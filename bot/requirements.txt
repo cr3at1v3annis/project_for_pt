@@ -1,7 +1,0 @@
-urllib3==1.26.15
-python-telegram-bot==13.7
-paramiko
-requests
-psycopg2-binary
-python-dotenv
-docker
