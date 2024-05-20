@@ -1,0 +1,115 @@
+- name: Tasks for all hosts
+# для каких хостов запускаем
+  hosts: all
+# определяем задания
+  tasks:
+# скачиваем postgresql
+    - name: Install postgresql
+# указываем пакет, аналогично для остальных, present указывает на скачивание пакета
+      package: 
+        name: postgresql
+        state: present
+    - name: Install psycopg
+      package: 
+        name: postgresql-contrib
+        state: present
+    - name: Install libpq-dev
+      package:
+        name: libpq-dev
+        state: present
+
+- name: Initialization of Master DB
+  hosts: host02
+  tasks:
+    - name: Copy of init.sql
+      copy:
+        src: "{{ hostvars[inventory_hostname]['dir'] }}/init.sql"
+        dest: /tmp/init.sql
+        mode: '0644'
+    - name: Chown postgres to /tmp/init.sql
+      command: chown postgres:postgres /tmp/init.sql
+    - name: Change postgres password
+      command: psql -c "ALTER USER {{ hostvars[inventory_hostname]['DB_USER'] }} WITH PASSWORD '{{ hostvars[inventory_hostname]['DB_PASSWORD'] }}';"
+      become_user: postgres
+    - name: Create replication user
+      command: psql -c "CREATE USER {{ hostvars[inventory_hostname]['DB_REPL_USER'] }} REPLICATION LOGIN SUPERUSER PASSWORD '{{ hostvars[inventory_hostname]['DB_REPL_PASSWORD'] }}';"
+      become_user: postgres
+      ignore_errors: true
+    - name: Restart postgresql
+      service:
+        name: postgresql
+        state: restarted
+    - name: Launch of init.sql
+      command: psql -a -f /tmp/init.sql
+      become: true
+      become_user: postgres
+    - name: Adding to configuration file postgresql.conf
+      blockinfile:
+        path: "/etc/postgresql/{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}/main/postgresql.conf"
+        block: |
+          wal_level=replica
+          hot_standby=on
+          max_wal_senders=10
+          max_replication_slots=10
+          hot_standby_feedback=on
+          wal_log_hints=on
+          log_replication_commands=on
+          listen_addresses='*'
+          port=${DB_PORT}
+          logging_collector=on
+    - name: Adding to configuration file pg_hba conf
+      blockinfile:
+        path: "/etc/postgresql/{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}/main/pg_hba.conf"
+        block: | 
+          host replication all {{ hostvars[inventory_hostname]['ansible_host'] }}/24 scram-sha-256
+          host all all {{ hostvars[inventory_hostname]['ansible_host'] }}/32 trust
+    - name: Restart postgresql
+      service:
+        name: postgresql
+        state: restarted
+      
+- name: Initialization of Slave DB
+  hosts: host03
+  tasks:
+    - name: RM of /var/lib/posgresql/data files for backup
+      command: rm -rf /var/lib/postgresql/{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}/
+    - name: Backup of Master DB
+      command: pg_basebackup -h {{ hostvars[inventory_hostname]['DB_HOST'] }} -D /var/lib/postgresql/{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}/main/ -U {{ hostvars[inventory_hostname]['DB_REPL_USER'] }} -vP -w
+      environment: 
+        PGPASSWORD: "{{ hostvars[inventory_hostname]['DB_REPL_PASSWORD'] }}"
+    - name: Chown postgres to /var/lib/postgresql
+      command: chown -R postgres:postgres /var/lib/postgresql/
+    - name: Restart of postgresql
+      service:
+        name: postgresql
+        state: restarted
+
+- name: Python bot
+  hosts: host01
+  tasks:
+    - name: Creation of directory to project
+      command: mkdir -p "{{ hostvars[inventory_hostname]['dir'] }}/repo"
+    - name: Cloning of repository
+      git:
+        repo: https://github.com/cr3at1v3annis/project_for_pt.git
+        dest: "{{ hostvars[inventory_hostname]['dir'] }}/repo"
+        version: main
+    - name: Installation of packages
+      pip: 
+        requirements: "{{ hostvars[inventory_hostname]['dir'] }}/repo/requirements.txt"
+    - name: Creation directory for logs
+      command: mkdir -p "{{ hostvars[inventory_hostname]['dir'] }}/../logs"
+    - name: Run python bot
+      command: python3 "{{ hostvars[inventory_hostname]['dir'] }}/repo/bot.py"
+      environment:
+        TOKEN: "{{ hostvars[inventory_hostname]['TOKEN'] }}"
+        RM_HOST: "{{ hostvars[inventory_hostname]['RM_HOST'] }}"
+        RM_PORT: "{{ hostvars[inventory_hostname]['RM_PORT'] }}"
+        RM_USER: "{{ hostvars[inventory_hostname]['RM_USER'] }}"
+        RM_PASSWORD: "{{ hostvars[inventory_hostname]['RM_PASSWORD'] }}"
+        DB_HOST: "{{ hostvars[inventory_hostname]['ansible_host'] }}"
+        DB_PORT: "{{ hostvars[inventory_hostname]['DB_PORT'] }}"
+        DB_USER: "{{ hostvars[inventory_hostname]['DB_USER'] }}"
+        DB_PASSWORD: "{{ hostvars[inventory_hostname]['DB_PASSWORD'] }}"
+        DB_DATABASE: "{{ hostvars[inventory_hostname]['DB_DATABASE'] }}"
+        PG_VERSION: "{{ hostvars[inventory_hostname]['POSTGRES_VERSION'] }}"
